@@ -1,0 +1,8 @@
+# ZFS hosts: docker compose -f compose.yaml -f compose.zfs.yaml up --build
+services:
+  app:
+    devices:
+      - /dev/zfs:/dev/zfs:r
+    volumes:
+      - /etc/zfs:/etc/zfs:ro
+      - /proc/spl:/host/proc/spl:ro
