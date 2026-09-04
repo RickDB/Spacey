@@ -131,7 +131,7 @@ func (s Scanner) Scan(ctx context.Context, root string, emit func(model.Node) er
 	return p, nil
 }
 func toNode(path, parent, root string, info os.FileInfo) model.Node {
-	n := model.Node{CanonicalPath: path, ParentPath: parent, RelativePath: relative(root, path), Name: info.Name(), Mode: uint32(info.Mode()), ModifiedAt: info.ModTime()}
+	n := model.Node{CanonicalPath: path, ParentPath: parent, RelativePath: relative(root, path), Name: info.Name(), Mode: int64(info.Mode()), ModifiedAt: info.ModTime()}
 	switch {
 	case info.Mode().IsRegular():
 		n.Type = "file"
@@ -147,10 +147,10 @@ func toNode(path, parent, root string, info os.FileInfo) model.Node {
 	}
 	if st, ok := info.Sys().(*syscall.Stat_t); ok {
 		n.AllocatedSize = st.Blocks * 512
-		n.UID = uint64(st.Uid)
-		n.GID = uint64(st.Gid)
-		n.DeviceID = uint64(st.Dev)
-		n.Inode = st.Ino
+		n.UID = int64(st.Uid)
+		n.GID = int64(st.Gid)
+		n.DeviceID = int64(st.Dev)
+		n.Inode = int64(st.Ino)
 		n.AccessedAt = time.Unix(st.Atim.Sec, st.Atim.Nsec)
 	}
 	return n

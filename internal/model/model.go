@@ -6,8 +6,7 @@ type Node struct {
 	ID, ParentID                                                                          int64
 	CanonicalPath, ParentPath, RelativePath, Name, Type, Extension, LinkTarget, ReadError string
 	LogicalSize, AllocatedSize                                                            int64
-	Mode                                                                                  uint32
-	UID, GID, DeviceID, Inode                                                             uint64
+	Mode, UID, GID, DeviceID, Inode                                                       int64
 	ModifiedAt, AccessedAt                                                                time.Time
 }
 type Progress struct {
