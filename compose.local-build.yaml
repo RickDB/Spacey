@@ -1,0 +1,5 @@
+# Development overlay: build the current checkout instead of pulling GHCR.
+services:
+  app:
+    build: .
+    pull_policy: build

@@ -14,7 +14,11 @@ services:
       retries: 20
 
   app:
-    build: .
+    image: ghcr.io/rickdb/spacey:${SPACEY_TAG:-latest}
+    pull_policy: always
+    labels:
+      org.opencontainers.image.source: https://github.com/RickDB/Spacey
+      org.opencontainers.image.documentation: https://github.com/RickDB/Spacey#readme
     depends_on:
       db:
         condition: service_healthy

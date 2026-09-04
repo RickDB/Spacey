@@ -5,13 +5,21 @@ Spacey is a Go and PostgreSQL storage inventory for Linux, NAS, and ZFS systems.
 ## Start
 
 ```sh
-docker compose up --build
+docker compose up -d
 ```
 
 On a ZFS host, add the read-only discovery overlay:
 
 ```sh
-docker compose -f compose.yaml -f compose.zfs.yaml up --build
+docker compose -f compose.yaml -f compose.zfs.yaml up -d
+```
+
+The production Compose configuration pulls `ghcr.io/rickdb/spacey:latest` by default. Pin a different published tag with `SPACEY_TAG`.
+
+To build the current checkout for development:
+
+```sh
+docker compose -f compose.yaml -f compose.local-build.yaml up --build
 ```
 
 Open http://localhost:8080. Add a storage source with both its canonical host path (for example `/mnt/tank/media`) and its in-container path (`/host/mnt/tank/media`). Spacey stores canonical host-visible paths.
