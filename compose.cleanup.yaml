@@ -1,0 +1,7 @@
+# Opt-in cleanup: mount only one explicitly selected media root writable.
+# Add that source with container path /host/cleanup in Spacey.
+services:
+  app:
+    user: "${SPACEY_UID:?Set SPACEY_UID}:${SPACEY_GID:?Set SPACEY_GID}"
+    volumes:
+      - ${SPACEY_CLEANUP_HOST_PATH:?Set SPACEY_CLEANUP_HOST_PATH}:/host/cleanup:rw

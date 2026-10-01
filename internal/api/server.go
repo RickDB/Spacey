@@ -3,10 +3,11 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"html/template"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,15 +29,31 @@ type Server struct {
 	mu        sync.RWMutex
 	progress  map[string]model.Progress
 	cancels   map[string]context.CancelFunc
-	page      *template.Template
+	mdblist   *mediaState
+	settings  appSettings
 }
 
 func New(db *database.DB, host int64, workers int) *Server {
-	return &Server{DB: db, HostID: host, Workers: workers, Discovery: zfs.Discovery{}, progress: map[string]model.Progress{}, cancels: map[string]context.CancelFunc{}, page: template.Must(template.New("page").Funcs(template.FuncMap{"bytes": human}).Parse(pageHTML))}
+	s := &Server{DB: db, HostID: host, Workers: workers, Discovery: zfs.Discovery{}, progress: map[string]model.Progress{}, cancels: map[string]context.CancelFunc{}, mdblist: newMediaState()}
+	if found, err := db.AppSettings(context.Background(), &s.settings); err != nil {
+		panic(err)
+	} else if found {
+		s.Workers = s.settings.ScanWorkers
+		s.mdblist.applySettings(s.settings)
+	}
+	return s
 }
 func (s *Server) StartDiscovery(ctx context.Context) {
+	go s.scheduleLoop(ctx)
+	go s.mediaSyncLoop(ctx)
 	go func() {
 		run := func() {
+			s.mu.RLock()
+			enabled := s.settings.EnableZFS
+			s.mu.RUnlock()
+			if !enabled {
+				return
+			}
 			result := s.Discovery.Discover(ctx)
 			if result.Detected {
 				_ = s.DB.SaveZFS(ctx, s.HostID, result.Pools, result.Datasets)
@@ -59,6 +76,10 @@ func (s *Server) Handler() http.Handler {
 	m := http.NewServeMux()
 	m.HandleFunc("GET /healthz", s.health)
 	m.HandleFunc("GET /", s.index)
+	m.Handle("GET /static/", http.StripPrefix("/static/", s.assets()))
+	m.HandleFunc("GET /api/v1/settings", s.settingsStatus)
+	m.HandleFunc("POST /api/v1/setup", s.saveSettings)
+	m.HandleFunc("PUT /api/v1/settings", s.saveSettings)
 	m.HandleFunc("GET /api/v1/storage", s.listStorage)
 	m.HandleFunc("POST /api/v1/storage", s.addStorage)
 	m.HandleFunc("POST /api/v1/storage/{id}/scan", s.startScan)
@@ -67,6 +88,22 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/v1/scans/{id}/events", s.events)
 	m.HandleFunc("GET /api/v1/scans/{id}/nodes", s.nodes)
 	m.HandleFunc("GET /api/v1/files/largest", s.largest)
+	m.HandleFunc("GET /api/v1/overview", s.overview)
+	m.HandleFunc("GET /api/v1/search", s.search)
+	m.HandleFunc("GET /api/v1/filters", s.filters)
+	m.HandleFunc("POST /api/v1/filters", s.addFilter)
+	m.HandleFunc("DELETE /api/v1/filters/{id}", s.deleteFilter)
+	m.HandleFunc("GET /api/v1/schedules", s.schedules)
+	m.HandleFunc("POST /api/v1/schedules", s.addSchedule)
+	m.HandleFunc("DELETE /api/v1/schedules/{id}", s.deleteSchedule)
+	m.HandleFunc("GET /api/v1/mdblist", s.mdblistStatus)
+	m.HandleFunc("GET /api/v1/media", s.mediaStatus)
+	m.HandleFunc("POST /api/v1/media/sync", s.mediaSync)
+	m.HandleFunc("GET /api/v1/trash", s.trashList)
+	m.HandleFunc("POST /api/v1/trash", s.moveToTrash)
+	m.HandleFunc("POST /api/v1/trash/{id}/restore", s.restoreTrash)
+	m.HandleFunc("GET /api/v1/cleanup/status", s.cleanupStatus)
+	m.HandleFunc("POST /api/v1/mdblist/sync", s.mdblistSync)
 	m.HandleFunc("GET /api/v1/zfs", s.zfsOverview)
 	m.HandleFunc("POST /api/v1/zfs/discover", s.discover)
 	return logging(m)
@@ -78,11 +115,26 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOut(w, map[string]string{"status": "ok"})
 }
+
+//go:embed static/*
+var staticFiles embed.FS
+
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
-	sources, _ := s.DB.Sources(r.Context())
-	scans, _ := s.DB.Scans(r.Context())
-	pools, sets, _ := s.DB.ZFS(r.Context())
-	_ = s.page.Execute(w, map[string]any{"Sources": sources, "Scans": scans, "Pools": pools, "Datasets": sets})
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	b, e := staticFiles.ReadFile("static/index.html")
+	if e != nil {
+		problem(w, 500, e)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(b)
+}
+func (s *Server) assets() http.Handler {
+	sub, _ := fs.Sub(staticFiles, "static")
+	return http.FileServer(http.FS(sub))
 }
 func (s *Server) listStorage(w http.ResponseWriter, r *http.Request) {
 	x, e := s.DB.Sources(r.Context())
@@ -93,6 +145,9 @@ func (s *Server) listStorage(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, x)
 }
 func (s *Server) addStorage(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
 	var in struct{ Name, CanonicalRoot, ContainerRoot string }
 	if e := json.NewDecoder(r.Body).Decode(&in); e != nil {
 		problem(w, 400, e)
@@ -163,7 +218,10 @@ func (s *Server) runScan(ctx context.Context, id string, src model.StorageSource
 		s.progress[id] = p
 		s.mu.Unlock()
 	}
-	p, e := (scanner.Scanner{Options: scanner.Options{Workers: s.Workers}}).Scan(ctx, src.ContainerRoot, mapNode, update)
+	s.mu.RLock()
+	workers := s.Workers
+	s.mu.RUnlock()
+	p, e := (scanner.Scanner{Options: scanner.Options{Workers: workers, Exclude: []string{".spacey-trash"}}}).Scan(ctx, src.ContainerRoot, mapNode, update)
 	if e != nil {
 		writer.Rollback()
 		status := "failed"
@@ -333,15 +391,3 @@ func human(n int64) string {
 	}
 	return fmt.Sprintf("%.1f %s", v, u[i])
 }
-
-const pageHTML = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Spacey</title><style>
-:root{color-scheme:dark;--bg:#0b1220;--card:#151f31;--line:#2a3850;--text:#e7edf6;--muted:#91a0b7;--green:#4ed09b}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui}header{padding:22px 4vw;border-bottom:1px solid var(--line)}h1{margin:0;font-size:24px}main{max-width:1200px;margin:auto;padding:28px 4vw}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:9px;border-bottom:1px solid var(--line)}th,.muted{color:var(--muted)}button{background:var(--green);color:#062116;border:0;border-radius:7px;padding:8px 12px;font-weight:700}.warn{color:#ffcc66}.ok{color:var(--green)}code{font-size:12px}</style></head><body>
-<header><h1>Spacey</h1><span class="muted">Storage inventory that survives the storage</span></header><main><div class="grid">
-<section class="card"><h2>Storage</h2><form onsubmit="addSource(event)"><input name="name" placeholder="Name" required> <input name="canonical" placeholder="/mnt/tank/media" required> <input name="container" placeholder="/host/mnt/tank/media" required> <button>Add</button></form>{{if .Sources}}<table><tr><th>Name</th><th>Root</th><th>State</th><th></th></tr>{{range .Sources}}<tr><td>{{.Name}}</td><td><code>{{.CanonicalRoot}}</code></td><td>{{if .Available}}<span class="ok">Available{{else}}<span class="warn">Unavailable{{end}}</span></td><td>{{if .Available}}<button onclick="scan({{.ID}},this)">Scan</button>{{else}}Browse last inventory{{end}}</td></tr>{{end}}</table>{{else}}<p class="muted">Add a storage source to begin.</p>{{end}}<pre id="progress"></pre></section>
-<section class="card"><h2>ZFS</h2><button onclick="discover()">Refresh discovery</button>{{if .Pools}}<table><tr><th>Pool</th><th>Health</th><th>Allocated</th><th>Free</th></tr>{{range .Pools}}<tr><td>{{.Name}}{{if not .Available}} <span class="warn">missing</span>{{end}}</td><td>{{.Health}}</td><td>{{bytes .Allocated}}</td><td>{{bytes .Free}}</td></tr>{{end}}</table>{{else}}<p class="muted">Not detected yet. Spacey continues normally without ZFS.</p>{{end}}</section>
-</div><section class="card" style="margin-top:18px"><h2>Historical inventories</h2><p class="warn">Archived inventory — files shown may no longer exist. This view is PostgreSQL-only.</p><table><tr><th>Scan</th><th>Root</th><th>Status</th><th>Files</th><th>Logical size</th></tr>{{range .Scans}}<tr><td><a href="#" onclick="browse('{{.ID}}');return false"><code>{{.ID}}</code></a></td><td>{{.RootPath}}</td><td>{{.Status}}</td><td>{{.TotalFiles}}</td><td>{{bytes .LogicalBytes}}</td></tr>{{end}}</table><div id="browser"></div></section></main><script>
-async function addSource(e){e.preventDefault();let f=new FormData(e.target),r=await fetch('/api/v1/storage',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({Name:f.get('name'),CanonicalRoot:f.get('canonical'),ContainerRoot:f.get('container')})}),x=await r.json();if(!r.ok)alert(x.error);else location.reload()}
-async function scan(id,b){b.disabled=true;let r=await fetch('/api/v1/storage/'+id+'/scan',{method:'POST'}),x=await r.json();if(!r.ok){alert(x.error);b.disabled=false;return}let es=new EventSource('/api/v1/scans/'+x.id+'/events');es.addEventListener('progress',e=>{let p=JSON.parse(e.data);document.querySelector('#progress').textContent=JSON.stringify(p,null,2);if(p.status!=='running'){es.close();location.reload()}})}
-async function discover(){let r=await fetch('/api/v1/zfs/discover',{method:'POST'}),x=await r.json();if(!r.ok)alert(x.error);else location.reload()}
-async function browse(id,parent=''){let u='/api/v1/scans/'+id+'/nodes'+(parent?'?parent='+encodeURIComponent(parent):'');let x=await(await fetch(u)).json();document.querySelector('#browser').innerHTML='<h3>Stored inventory</h3><table><tr><th>Name</th><th>Type</th><th>Size</th></tr>'+x.map(n=>'<tr><td><a href="#" onclick="browse(\''+id+'\',\''+n.CanonicalPath.replaceAll("'","\\'")+'\');return false">'+n.Name+'</a></td><td>'+n.Type+'</td><td>'+n.LogicalSize+'</td></tr>').join('')+'</table>'}
-</script></body></html>`

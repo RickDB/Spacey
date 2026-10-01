@@ -14,8 +14,8 @@ services:
       retries: 20
 
   app:
-    image: ghcr.io/rickdb/spacey:${SPACEY_TAG:-latest}
-    pull_policy: always
+    build: .
+    image: spacey:local
     labels:
       org.opencontainers.image.source: https://github.com/RickDB/Spacey
       org.opencontainers.image.documentation: https://github.com/RickDB/Spacey#readme
@@ -25,10 +25,6 @@ services:
     environment:
       SPACEY_LISTEN: :8080
       SPACEY_DATABASE_URL: postgres://spacey:${POSTGRES_PASSWORD:-spacey}@db:5432/spacey?sslmode=disable
-      SPACEY_SCAN_WORKERS: ${SPACEY_SCAN_WORKERS:-8}
-      SPACEY_HOST_PREFIX: /
-      SPACEY_CONTAINER_PREFIX: /host
-      SPACEY_ZFS_DISCOVERY: auto
     ports:
       - "${SPACEY_PORT:-8080}:8080"
     volumes:

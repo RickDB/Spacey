@@ -29,26 +29,34 @@ func (d *DB) Migrate(ctx context.Context) error {
 	if _, e := d.Pool.Exec(ctx, "CREATE TABLE IF NOT EXISTS schema_migrations(version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())"); e != nil {
 		return e
 	}
-	var done bool
-	if e := d.Pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version='001_initial')").Scan(&done); e != nil || done {
-		return e
+	for _, version := range []string{"001_initial", "002_workflows", "003_settings"} {
+		var done bool
+		if e := d.Pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=$1)", version).Scan(&done); e != nil {
+			return e
+		}
+		if done {
+			continue
+		}
+		b, e := os.ReadFile("migrations/" + version + ".sql")
+		if e != nil {
+			return fmt.Errorf("load migration %s: %w", version, e)
+		}
+		tx, e := d.Pool.Begin(ctx)
+		if e != nil {
+			return e
+		}
+		if _, e = tx.Exec(ctx, string(b)); e == nil {
+			_, e = tx.Exec(ctx, "INSERT INTO schema_migrations(version) VALUES($1)", version)
+		}
+		if e != nil {
+			_ = tx.Rollback(ctx)
+			return e
+		}
+		if e = tx.Commit(ctx); e != nil {
+			return e
+		}
 	}
-	b, e := os.ReadFile("migrations/001_initial.sql")
-	if e != nil {
-		return fmt.Errorf("load migration: %w", e)
-	}
-	tx, e := d.Pool.Begin(ctx)
-	if e != nil {
-		return e
-	}
-	defer tx.Rollback(ctx)
-	if _, e = tx.Exec(ctx, string(b)); e != nil {
-		return e
-	}
-	if _, e = tx.Exec(ctx, "INSERT INTO schema_migrations(version) VALUES('001_initial')"); e != nil {
-		return e
-	}
-	return tx.Commit(ctx)
+	return nil
 }
 func (d *DB) EnsureHost(ctx context.Context, name string) (int64, error) {
 	var id int64
