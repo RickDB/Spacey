@@ -29,7 +29,7 @@ func (d *DB) Migrate(ctx context.Context) error {
 	if _, e := d.Pool.Exec(ctx, "CREATE TABLE IF NOT EXISTS schema_migrations(version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())"); e != nil {
 		return e
 	}
-	for _, version := range []string{"001_initial", "002_workflows", "003_settings"} {
+	for _, version := range []string{"001_initial", "002_workflows", "003_settings", "004_zfs_monitoring"} {
 		var done bool
 		if e := d.Pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=$1)", version).Scan(&done); e != nil {
 			return e
@@ -99,7 +99,7 @@ func (d *DB) CreateScan(ctx context.Context, id string, source int64, root strin
 }
 func (d *DB) DatasetForPath(ctx context.Context, path string) (int64, error) {
 	var id int64
-	e := d.Pool.QueryRow(ctx, `SELECT id FROM zfs_datasets WHERE mountpoint NOT IN ('','-','none','legacy') AND ($1=mountpoint OR $1 LIKE mountpoint||'/%') ORDER BY length(mountpoint) DESC LIMIT 1`, path).Scan(&id)
+	e := d.Pool.QueryRow(ctx, `SELECT id FROM zfs_datasets WHERE present AND mountpoint NOT IN ('','-','none','legacy') AND ($1=mountpoint OR $1 LIKE mountpoint||'/%') ORDER BY length(mountpoint) DESC LIMIT 1`, path).Scan(&id)
 	if errors.Is(e, pgx.ErrNoRows) {
 		return 0, nil
 	}

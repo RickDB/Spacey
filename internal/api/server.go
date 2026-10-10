@@ -30,6 +30,7 @@ type Server struct {
 	progress  map[string]model.Progress
 	cancels   map[string]context.CancelFunc
 	mdblist   *mediaState
+	zfsMu     sync.Mutex
 	settings  appSettings
 }
 
@@ -54,13 +55,12 @@ func (s *Server) StartDiscovery(ctx context.Context) {
 			if !enabled {
 				return
 			}
-			result := s.Discovery.Discover(ctx)
-			if result.Detected {
-				_ = s.DB.SaveZFS(ctx, s.HostID, result.Pools, result.Datasets)
-			}
+			c, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			defer cancel()
+			s.runZFSDiscovery(c)
 		}
 		run()
-		ticker := time.NewTicker(5 * time.Minute)
+		ticker := time.NewTicker(15 * time.Minute)
 		defer ticker.Stop()
 		for {
 			select {
@@ -71,6 +71,7 @@ func (s *Server) StartDiscovery(ctx context.Context) {
 			}
 		}
 	}()
+
 }
 func (s *Server) Handler() http.Handler {
 	m := http.NewServeMux()
@@ -105,6 +106,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/v1/cleanup/status", s.cleanupStatus)
 	m.HandleFunc("POST /api/v1/mdblist/sync", s.mdblistSync)
 	m.HandleFunc("GET /api/v1/zfs", s.zfsOverview)
+	m.HandleFunc("GET /api/v1/zfs/history", s.zfsHistory)
 	m.HandleFunc("POST /api/v1/zfs/discover", s.discover)
 	return logging(m)
 }
@@ -327,15 +329,61 @@ func (s *Server) zfsOverview(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, e)
 		return
 	}
-	jsonOut(w, map[string]any{"pools": p, "datasets": d})
+	status, e := s.DB.ZFSStatus(r.Context(), s.HostID)
+	if e != nil {
+		problem(w, 500, e)
+		return
+	}
+	jsonOut(w, map[string]any{"pools": p, "datasets": d, "monitor": status})
+}
+func (s *Server) zfsHistory(w http.ResponseWriter, r *http.Request) {
+	kind := r.URL.Query().Get("kind")
+	id, e := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
+	if e != nil || id < 1 {
+		problem(w, 400, fmt.Errorf("valid pool or dataset id required"))
+		return
+	}
+	span, e := database.ZFSRange(r.URL.Query().Get("range"), time.Now())
+	if e != nil {
+		problem(w, 400, e)
+		return
+	}
+	points, e := s.DB.ZFSHistory(r.Context(), kind, id, span)
+	if e != nil {
+		if kind != "pool" && kind != "dataset" {
+			problem(w, 400, e)
+		} else {
+			problem(w, 500, e)
+		}
+		return
+	}
+	jsonOut(w, map[string]any{"kind": kind, "id": id, "points": points})
+}
+func (s *Server) runZFSDiscovery(ctx context.Context) zfs.Result {
+	parent := ctx
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	s.zfsMu.Lock()
+	defer s.zfsMu.Unlock()
+	result := s.Discovery.Discover(ctx)
+	if result.Detected {
+		if e := s.DB.SaveZFS(ctx, s.HostID, result.Pools, result.Datasets); e != nil {
+			result.Detected = false
+			result.Diagnostic = "Save ZFS samples failed: " + e.Error()
+		}
+	}
+	if !result.Detected && parent.Err() == nil {
+		writeCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		_ = s.DB.SaveZFSFailure(writeCtx, s.HostID, result.Diagnostic)
+	}
+	return result
 }
 func (s *Server) discover(w http.ResponseWriter, r *http.Request) {
-	x := s.Discovery.Discover(r.Context())
-	if x.Detected {
-		if e := s.DB.SaveZFS(r.Context(), s.HostID, x.Pools, x.Datasets); e != nil {
-			problem(w, 500, e)
-			return
-		}
+	x := s.runZFSDiscovery(r.Context())
+	if !x.Detected {
+		problem(w, 502, fmt.Errorf("%s", x.Diagnostic))
+		return
 	}
 	jsonOut(w, x)
 }

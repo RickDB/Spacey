@@ -47,6 +47,7 @@ type ZFSDataset struct {
 	ID, PoolID                                                  int64
 	Name, Type, Mountpoint                                      string
 	Used, Available, Referenced, LogicalUsed, LogicalReferenced int64
+	Present                                                     bool
 	Compression                                                 float64
 	LastSeenAt                                                  time.Time
 }

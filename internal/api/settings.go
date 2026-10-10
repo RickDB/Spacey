@@ -166,6 +166,13 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	s.Workers = next.ScanWorkers
 	s.mu.Unlock()
 	s.mdblist.applySettings(next)
+	if next.EnableZFS && !old.EnableZFS {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			s.runZFSDiscovery(ctx)
+		}()
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()

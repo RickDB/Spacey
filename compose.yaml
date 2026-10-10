@@ -1,21 +1,30 @@
 services:
   db:
     image: postgres:18-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: spacey
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-spacey}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: spacey
     volumes:
       - postgres-data:/var/lib/postgresql/18/docker
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U spacey"]
+      test: ["CMD-SHELL", "pg_isready -U spacey -d spacey"]
       interval: 3s
       timeout: 3s
       retries: 20
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   app:
-    build: .
-    image: spacey:local
+    image: ghcr.io/rickdb/spacey:${SPACEY_TAG:-latest}
+    pull_policy: always
+    restart: unless-stopped
     labels:
       org.opencontainers.image.source: https://github.com/RickDB/Spacey
       org.opencontainers.image.documentation: https://github.com/RickDB/Spacey#readme
@@ -23,8 +32,9 @@ services:
       db:
         condition: service_healthy
     environment:
+      TZ: ${TZ:-Europe/Amsterdam}
       SPACEY_LISTEN: :8080
-      SPACEY_DATABASE_URL: postgres://spacey:${POSTGRES_PASSWORD:-spacey}@db:5432/spacey?sslmode=disable
+      SPACEY_DATABASE_URL: postgres://spacey:${POSTGRES_PASSWORD}@db:5432/spacey?sslmode=disable
     ports:
       - "${SPACEY_PORT:-8080}:8080"
     volumes:
@@ -32,7 +42,12 @@ services:
       - /:/host:ro,rslave
     security_opt:
       - no-new-privileges:true
-    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   postgres-data:
+    name: ${SPACEY_POSTGRES_VOLUME:-spacey-postgres-data}
