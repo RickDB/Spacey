@@ -1,5 +1,3 @@
-<p align="center"><img src="docs/assets/spacey-logo.png" width="112" alt="Spacey logo"></p>
-
 # Spacey
 
 ![Spacey storage intelligence banner](docs/assets/spacey-banner.webp)
