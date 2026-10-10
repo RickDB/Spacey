@@ -10,6 +10,7 @@ import (
 	"os"
 	"spacey/internal/model"
 	"sync"
+	"time"
 )
 
 type DB struct{ Pool *pgxpool.Pool }
@@ -181,12 +182,18 @@ func (d *DB) NewWriter(ctx context.Context, scan string, source, dataset int64) 
 func (w *Writer) Add(n model.Node) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.batch.Queue(`INSERT INTO filesystem_nodes(scan_id,storage_source_id,zfs_dataset_id,name,canonical_path,parent_path,relative_path,node_type,logical_size,allocated_size,extension,uid,gid,mode,device_id,inode,modified_at,accessed_at,link_target,read_error) VALUES($1,$2,NULLIF($3,0),$4,$5,$6,$7,$8,$9,$10,NULLIF($11,''),$12,$13,$14,$15,$16,NULLIF($17,'0001-01-01'),NULLIF($18,'0001-01-01'),NULLIF($19,''),NULLIF($20,''))`, w.scan, w.source, w.dataset, n.Name, n.CanonicalPath, n.ParentPath, n.RelativePath, n.Type, n.LogicalSize, n.AllocatedSize, n.Extension, n.UID, n.GID, n.Mode, n.DeviceID, n.Inode, n.ModifiedAt, n.AccessedAt, n.LinkTarget, n.ReadError)
+	w.batch.Queue(`INSERT INTO filesystem_nodes(scan_id,storage_source_id,zfs_dataset_id,name,canonical_path,parent_path,relative_path,node_type,logical_size,allocated_size,extension,uid,gid,mode,device_id,inode,modified_at,accessed_at,link_target,read_error) VALUES($1,$2,NULLIF($3,0),$4,$5,$6,$7,$8,$9,$10,NULLIF($11,''),$12,$13,$14,$15,$16,$17,$18,NULLIF($19,''),NULLIF($20,''))`, w.scan, w.source, w.dataset, n.Name, n.CanonicalPath, n.ParentPath, n.RelativePath, n.Type, n.LogicalSize, n.AllocatedSize, n.Extension, n.UID, n.GID, n.Mode, n.DeviceID, n.Inode, nullableTime(n.ModifiedAt), nullableTime(n.AccessedAt), n.LinkTarget, n.ReadError)
 	w.n++
 	if w.n >= 500 {
 		return w.flush()
 	}
 	return nil
+}
+func nullableTime(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
 }
 func (w *Writer) flush() error {
 	if w.n == 0 {
