@@ -26,6 +26,7 @@ type StorageSource struct {
 	ID                                 int64
 	Name, CanonicalRoot, ContainerRoot string
 	Enabled, Available                 bool
+	AvailabilityError                  string
 	LastAvailableAt                    *time.Time
 }
 type Scan struct {

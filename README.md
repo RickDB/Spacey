@@ -101,6 +101,8 @@ These fields describe the same directory from two viewpoints:
 - **Host path** is the permanent, canonical TrueNAS/Linux path saved in historical inventories.
 - **Container path** is the location Spacey can read inside its container.
 
+In **Settings → Sources**, choose **Edit** to correct a name or either path, then **Save changes** with your Spacey administrator password. Offline sources show the container path and the filesystem error. Availability requires a readable directory. Existing scan paths and inventories are retained exactly as captured; changing a source does not rewrite history.
+
 The default `/:/host:ro,rslave` mount means every host path gains a `/host` prefix inside the container. For example:
 
 | Dataset on the host | Host path field | Container path field |
@@ -176,7 +178,18 @@ Download `compose.zfs.yaml` when deploying without a Git checkout:
 curl -O https://raw.githubusercontent.com/RickDB/Spacey/main/compose.zfs.yaml
 ```
 
-The overlay passes `/dev/zfs` and mounts the host ZFS metadata read-only. It does not enable destructive ZFS operations. If `/dev/zfs` or `/proc/spl` does not exist, use only the base Compose file.
+The overlay passes `/dev/zfs` and mounts the host ZFS metadata read-only. Spacey runs only discovery/list commands. OpenZFS requires `rw` access to its control device even for list operations because [libzfs opens it with O_RDWR](https://github.com/openzfs/zfs/blob/zfs-2.2.2/lib/libzfs/libzfs_util.c). This device setting is not a filesystem mount permission. Keep the app non-root, drop all capabilities, and do not grant it ZFS administration delegation. If `/dev/zfs` or `/proc/spl` does not exist, use only the base Compose file.
+
+If discovery reports that `/dev/zfs` and `/proc/self/mounts` are required, check `docker compose exec app ls -l /dev/zfs /proc/self/mounts`. A normal Docker container already has `/proc`; when the device is missing, add the ZFS overlay and recreate the app. Do not run `udevadm trigger` or mount a new `/proc` based only on this generic ZFS error. For a custom stack, add this to its existing app service and redeploy:
+
+```yaml
+devices:
+  - /dev/zfs:/dev/zfs:rw
+cap_drop:
+  - ALL
+```
+
+Keep the existing database volume and storage mounts when redeploying.
 
 ## Backup and removal
 
@@ -206,4 +219,4 @@ Enable ZFS discovery in the wizard or Settings. Spacey samples pool capacity, al
 
 ## API and development
 
-The API is under `/api/v1/`. Main resources: `storage`, `scans`, `scans/{id}/nodes`, `scans/{id}/events`, `overview`, `search`, `filters`, `schedules`, `trash`, `media`, `mdblist`, `zfs`, and `zfs/history`. `POST /api/v1/trash`, restore, and `PUT /api/v1/settings` require the `X-Spacey-Admin-Token` header with the administrator password. `POST /api/v1/setup` is available only before setup is complete. Run `go test ./...` for the Go checks and `node --check internal/api/static/app.js` for browser script syntax.
+The API is under `/api/v1/`. Main resources: `storage`, `scans`, `scans/{id}/nodes`, `scans/{id}/events`, `overview`, `search`, `filters`, `schedules`, `trash`, `media`, `mdblist`, `zfs`, and `zfs/history`. `POST /api/v1/storage`, `PUT /api/v1/storage/{id}`, `POST /api/v1/trash`, restore, and `PUT /api/v1/settings` require the `X-Spacey-Admin-Token` header with the administrator password. `POST /api/v1/setup` is available only before setup is complete. Run `go test ./...` for the Go checks and `node --check internal/api/static/app.js` for browser script syntax.

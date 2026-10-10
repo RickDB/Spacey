@@ -6,6 +6,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -19,6 +20,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type Server struct {
@@ -83,6 +87,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("PUT /api/v1/settings", s.saveSettings)
 	m.HandleFunc("GET /api/v1/storage", s.listStorage)
 	m.HandleFunc("POST /api/v1/storage", s.addStorage)
+	m.HandleFunc("PUT /api/v1/storage/{id}", s.updateStorage)
 	m.HandleFunc("POST /api/v1/storage/{id}/scan", s.startScan)
 	m.HandleFunc("GET /api/v1/storage/{id}/nodes", s.currentNodes)
 	m.HandleFunc("GET /api/v1/scans", s.scans)
@@ -155,6 +160,9 @@ func (s *Server) addStorage(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, e)
 		return
 	}
+	in.Name = strings.TrimSpace(in.Name)
+	in.CanonicalRoot = strings.TrimSpace(in.CanonicalRoot)
+	in.ContainerRoot = strings.TrimSpace(in.ContainerRoot)
 	if in.Name == "" || !filepath.IsAbs(in.CanonicalRoot) || !filepath.IsAbs(in.ContainerRoot) {
 		problem(w, 400, fmt.Errorf("name and absolute canonical/container roots required"))
 		return
@@ -165,6 +173,43 @@ func (s *Server) addStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOutStatus(w, x, 201)
+}
+func (s *Server) updateStorage(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
+	id, e := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if e != nil {
+		problem(w, 400, fmt.Errorf("invalid storage source id"))
+		return
+	}
+	var in struct{ Name, CanonicalRoot, ContainerRoot string }
+	if e = json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&in); e != nil {
+		problem(w, 400, e)
+		return
+	}
+	in.Name = strings.TrimSpace(in.Name)
+	in.CanonicalRoot = filepath.Clean(strings.TrimSpace(in.CanonicalRoot))
+	in.ContainerRoot = filepath.Clean(strings.TrimSpace(in.ContainerRoot))
+	if in.Name == "" || !filepath.IsAbs(in.CanonicalRoot) || !filepath.IsAbs(in.ContainerRoot) {
+		problem(w, 400, fmt.Errorf("name and absolute canonical/container roots required"))
+		return
+	}
+	x, e := s.DB.UpdateSource(r.Context(), s.HostID, id, in.Name, in.CanonicalRoot, in.ContainerRoot)
+	if errors.Is(e, pgx.ErrNoRows) {
+		problem(w, 404, fmt.Errorf("storage source not found"))
+		return
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(e, &pgErr) && pgErr.Code == "23505" {
+		problem(w, 409, fmt.Errorf("another source already uses this host path"))
+		return
+	}
+	if e != nil {
+		problem(w, 500, e)
+		return
+	}
+	jsonOut(w, x)
 }
 func (s *Server) startScan(w http.ResponseWriter, r *http.Request) {
 	sid, e := strconv.ParseInt(r.PathValue("id"), 10, 64)

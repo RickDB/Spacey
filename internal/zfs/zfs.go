@@ -39,6 +39,9 @@ func (d Discovery) Discover(ctx context.Context) Result {
 	po, e := d.Runner.Run(ctx, "zpool", "list", "-H", "-p", "-o", "name,health,size,alloc,free,frag")
 	if e != nil {
 		r.Diagnostic = diagnose("zpool list", po, e)
+		if _, statErr := os.Stat("/dev/zfs"); os.IsNotExist(statErr) {
+			r.Diagnostic = "ZFS device is not exposed to Spacey. Use compose.zfs.yaml and recreate the app container. libzfs requires rw control-device access even for read-only list commands; keep Spacey non-root with all capabilities dropped."
+		}
 		return r
 	}
 	r.Pools, e = ParsePools(string(po))

@@ -46,3 +46,29 @@ func TestSetupRequiresAdministratorAndSource(t *testing.T) {
 		t.Fatalf("got status %d: %s", w.Code, w.Body.String())
 	}
 }
+
+func TestUpdateSourceRequiresAdminAndValidPaths(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("long-password-here"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{settings: appSettings{AdminHash: string(hash)}}
+	for _, tc := range []struct {
+		password, id, body string
+		status             int
+	}{
+		{"", "1", `{}`, 401},
+		{"long-password-here", "invalid", `{}`, 400},
+		{"long-password-here", "1", `{"Name":"Media","CanonicalRoot":"relative","ContainerRoot":"/host/media"}`, 400},
+		{"long-password-here", "1", `{"Name":"  ","CanonicalRoot":"/mnt/media","ContainerRoot":"/host/media"}`, 400},
+	} {
+		r := httptest.NewRequest("PUT", "/api/v1/storage/"+tc.id, strings.NewReader(tc.body))
+		r.SetPathValue("id", tc.id)
+		r.Header.Set("X-Spacey-Admin-Token", tc.password)
+		w := httptest.NewRecorder()
+		s.updateStorage(w, r)
+		if w.Code != tc.status {
+			t.Fatalf("got %d, want %d: %s", w.Code, tc.status, w.Body.String())
+		}
+	}
+}

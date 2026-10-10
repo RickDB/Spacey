@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"io"
 	"os"
 	"spacey/internal/model"
 	"sync"
@@ -66,7 +67,19 @@ func (d *DB) EnsureHost(ctx context.Context, name string) (int64, error) {
 func (d *DB) CreateSource(ctx context.Context, host int64, name, canonical, container string) (model.StorageSource, error) {
 	var s model.StorageSource
 	e := d.Pool.QueryRow(ctx, `INSERT INTO storage_sources(host_id,name,canonical_root,container_root,last_available_at) VALUES($1,$2,$3,$4,CASE WHEN $5 THEN now() END) ON CONFLICT(host_id,canonical_root) DO UPDATE SET name=excluded.name,container_root=excluded.container_root RETURNING id,name,canonical_root,container_root,enabled,last_available_at`, host, name, canonical, container, pathExists(container)).Scan(&s.ID, &s.Name, &s.CanonicalRoot, &s.ContainerRoot, &s.Enabled, &s.LastAvailableAt)
-	s.Available = pathExists(container)
+	s.Available, s.AvailabilityError = sourceAvailability(container)
+	return s, e
+}
+func (d *DB) UpdateSource(ctx context.Context, host, id int64, name, canonical, container string) (model.StorageSource, error) {
+	var s model.StorageSource
+	available := pathExists(container)
+	e := d.Pool.QueryRow(ctx, `UPDATE storage_sources
+		SET name=$3,canonical_root=$4,container_root=$5,last_available_at=CASE WHEN $6 THEN now() ELSE last_available_at END
+		WHERE id=$2 AND host_id=$1
+		RETURNING id,name,canonical_root,container_root,enabled,last_available_at`,
+		host, id, name, canonical, container, available,
+	).Scan(&s.ID, &s.Name, &s.CanonicalRoot, &s.ContainerRoot, &s.Enabled, &s.LastAvailableAt)
+	s.Available, s.AvailabilityError = sourceAvailability(container)
 	return s, e
 }
 func (d *DB) Sources(ctx context.Context) ([]model.StorageSource, error) {
@@ -81,7 +94,7 @@ func (d *DB) Sources(ctx context.Context) ([]model.StorageSource, error) {
 		if e = rows.Scan(&s.ID, &s.Name, &s.CanonicalRoot, &s.ContainerRoot, &s.Enabled, &s.LastAvailableAt); e != nil {
 			return nil, e
 		}
-		s.Available = pathExists(s.ContainerRoot)
+		s.Available, s.AvailabilityError = sourceAvailability(s.ContainerRoot)
 		out = append(out, s)
 	}
 	return out, rows.Err()
@@ -89,10 +102,28 @@ func (d *DB) Sources(ctx context.Context) ([]model.StorageSource, error) {
 func (d *DB) Source(ctx context.Context, id int64) (model.StorageSource, error) {
 	var s model.StorageSource
 	e := d.Pool.QueryRow(ctx, "SELECT id,name,canonical_root,container_root,enabled,last_available_at FROM storage_sources WHERE id=$1", id).Scan(&s.ID, &s.Name, &s.CanonicalRoot, &s.ContainerRoot, &s.Enabled, &s.LastAvailableAt)
-	s.Available = pathExists(s.ContainerRoot)
+	s.Available, s.AvailabilityError = sourceAvailability(s.ContainerRoot)
 	return s, e
 }
-func pathExists(p string) bool { _, e := os.Stat(p); return e == nil }
+func pathExists(p string) bool { ok, _ := sourceAvailability(p); return ok }
+func sourceAvailability(p string) (bool, string) {
+	f, err := os.Open(p)
+	if err != nil {
+		return false, err.Error()
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return false, err.Error()
+	}
+	if !info.IsDir() {
+		return false, "container path is not a directory"
+	}
+	if _, err = f.Readdirnames(1); err != nil && err != io.EOF {
+		return false, err.Error()
+	}
+	return true, ""
+}
 func (d *DB) CreateScan(ctx context.Context, id string, source int64, root string) error {
 	_, e := d.Pool.Exec(ctx, "INSERT INTO scans(id,storage_source_id,status,scanner_version,root_path,started_at) VALUES($1,$2,'running','0.1.0',$3,now())", id, source, root)
 	return e

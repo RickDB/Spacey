@@ -1,8 +1,11 @@
 # ZFS hosts: docker compose -f compose.yaml -f compose.zfs.yaml up -d
 services:
   app:
+    cap_drop:
+      - ALL
     devices:
-      - /dev/zfs:/dev/zfs:r
+      # libzfs opens the control device O_RDWR even for list operations.
+      - /dev/zfs:/dev/zfs:rw
     volumes:
       - /etc/zfs:/etc/zfs:ro
       - /proc/spl:/host/proc/spl:ro
